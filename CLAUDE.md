@@ -49,6 +49,10 @@ Each extension lives in its own directory with a single `.ts` entry file. Extens
 
 Templates live in `prompts/*.md` and are invoked with `/name` in the pi editor. Only `description:` is valid frontmatter — `allowed-tools` and other Claude-specific keys are silently ignored.
 
+### Skills
+
+Skills live in `skills/<name>/SKILL.md`. Registered via `pi.skills: ["./skills"]` in `package.json`. Naming rules (violations silently skip loading): lowercase + hyphens only, ≤ 64 chars, must match parent directory name, no leading/trailing/consecutive hyphens, `description:` frontmatter is required. Progressive disclosure: `description` always in context → `SKILL.md` loads on invocation → `references/*.md` loads on demand. Keep `SKILL.md` as opinionated guide + read-pointers; put copy-paste code in `references/`.
+
 ### Extension shape
 
 Every extension is a default-exported function that receives the `ExtensionAPI`:
@@ -83,6 +87,30 @@ The most complex extension. It wraps pi-tui's `AutocompleteProvider` and `Custom
 |---|---|---|
 | `PI_SKIP_AUTO_UPDATE` | update-notifier | Disables startup version check |
 | `PI_BASH_DEFAULT_TIMEOUT` | bash-timeout | Overrides default timeout in seconds (default: 120) |
+
+## Reading pi docs
+
+All pi documentation is installed alongside the package:
+
+```bash
+# Docs (markdown)
+ls $(npm root -g)/@mariozechner/pi-coding-agent/docs/
+# Examples (working TypeScript)
+ls $(npm root -g)/@mariozechner/pi-coding-agent/examples/
+# README
+cat $(npm root -g)/@mariozechner/pi-coding-agent/README.md
+```
+
+With mise the resolved path is:
+`~/.local/share/mise/installs/node/<version>/lib/node_modules/@mariozechner/pi-coding-agent/`
+
+Key docs to reach for first:
+- `docs/extensions.md` — extension API reference
+- `docs/prompt-templates.md` — template format and loading rules
+- `docs/packages.md` — `package.json` `pi.*` keys (`extensions`, `prompts`, `skills`, …)
+- `docs/skills.md` — skill structure, frontmatter rules, loading order
+- `docs/tui.md` — TUI component API (needed for `skill-shortcut`-style work)
+- `examples/extensions/` — working reference implementations
 
 ## Gotchas
 
