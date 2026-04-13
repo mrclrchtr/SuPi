@@ -29,7 +29,7 @@ Toolchain versions are managed via mise (`node = "lts"`, `pnpm = "latest"`).
 
 ## Architecture
 
-Each extension lives in its own directory with a single `.ts` entry file. Extensions are registered in `package.json` under `pi.extensions`:
+Each extension lives in its own directory with a single `.ts` entry file. Extensions are registered in `package.json` under `pi.extensions`. Prompt templates live in `prompts/*.md` and are registered under `pi.prompts`:
 
 ```json
 "pi": {
@@ -38,9 +38,16 @@ Each extension lives in its own directory with a single `.ts` entry file. Extens
     "./update-notifier/update-notifier.ts",
     "./bash-timeout/index.ts",
     "./skill-shortcut/skill-shortcut.ts"
+  ],
+  "prompts": [
+    "./prompts"
   ]
 }
 ```
+
+### Prompt templates
+
+Templates live in `prompts/*.md` and are invoked with `/name` in the pi editor. Only `description:` is valid frontmatter — `allowed-tools` and other Claude-specific keys are silently ignored.
 
 ### Extension shape
 
@@ -83,3 +90,4 @@ The most complex extension. It wraps pi-tui's `AutocompleteProvider` and `Custom
 - **`~` version range on peerDeps**: intentional — pins to the minor release train (`~0.66.0` allows `0.66.x` only) to avoid silent breakage from pi API changes across minor versions.
 - **`skill-shortcut` accesses private TUI internals**: `SkillShortcutEditor` casts `this as any` to reach `autocompleteState`, `state`, and `tryTriggerAutocomplete`. These are undocumented internals and may break on `@mariozechner/pi-tui` upgrades — verify after bumping.
 - **`bash-timeout` entry point is `index.ts`**: all other extensions use `dir/dir.ts` naming; `bash-timeout` uses `bash-timeout/index.ts`. This is intentional (copied from source) but inconsistent.
+- **Prompt template frontmatter**: only `description:` is supported; Claude-specific keys like `allowed-tools` are silently ignored — strip them when porting Claude commands.

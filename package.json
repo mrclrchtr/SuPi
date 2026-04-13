@@ -10,6 +10,9 @@
     "@mariozechner/pi-tui": "~0.66.0"
   },
   "pi": {
+    "prompts": [
+      "./prompts"
+    ],
     "extensions": [
       "./aliases/aliases.ts",
       "./update-notifier/update-notifier.ts",
