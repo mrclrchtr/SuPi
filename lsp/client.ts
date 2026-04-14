@@ -2,6 +2,7 @@
 // Handles initialize handshake, document sync, shutdown, and crash recovery.
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { CLIENT_CAPABILITIES } from "./capabilities.ts";
 import { JsonRpcClient } from "./transport.ts";
 import type {
@@ -228,17 +229,41 @@ export class LspClient {
     });
   }
 
-  /** Close a document. */
+  /** Close a document and clear any cached state for it. */
   didClose(filePath: string): void {
-    if (!this.rpc || this._status !== "running") return;
-
     const uri = fileToUri(filePath);
-    if (!this.openDocs.has(uri)) return;
+    const wasOpen = this.openDocs.has(uri);
 
-    this.openDocs.delete(uri);
+    this.clearFileState(uri);
+
+    if (!wasOpen || !this.rpc || this._status !== "running") return;
+
     this.rpc.sendNotification("textDocument/didClose", {
       textDocument: { uri } satisfies TextDocumentIdentifier,
     });
+  }
+
+  /** Prune missing files from open documents and cached diagnostics. */
+  pruneMissingFiles(): string[] {
+    const uris = new Set([...this.openDocs.keys(), ...this.diagnosticStore.keys()]);
+    const removedFiles: string[] = [];
+
+    for (const uri of uris) {
+      const filePath = uriToFile(uri);
+      if (existsSync(filePath)) continue;
+
+      const wasOpen = this.openDocs.has(uri);
+      this.clearFileState(uri);
+      removedFiles.push(filePath);
+
+      if (wasOpen && this.rpc && this._status === "running") {
+        this.rpc.sendNotification("textDocument/didClose", {
+          textDocument: { uri } satisfies TextDocumentIdentifier,
+        });
+      }
+    }
+
+    return removedFiles;
   }
 
   // ── Diagnostics ─────────────────────────────────────────────────────
@@ -353,12 +378,20 @@ export class LspClient {
 
   private handlePublishDiagnostics(params: PublishDiagnosticsParams): void {
     this.diagnosticStore.set(params.uri, params.diagnostics);
+    this.releaseDiagnosticWaiters(params.uri);
+  }
 
-    // Wake up any waiters
-    const waiters = this.diagnosticWaiters.get(params.uri);
-    if (waiters) {
-      this.diagnosticWaiters.delete(params.uri);
-      for (const w of waiters) w();
-    }
+  private clearFileState(uri: string): void {
+    this.openDocs.delete(uri);
+    this.diagnosticStore.delete(uri);
+    this.releaseDiagnosticWaiters(uri);
+  }
+
+  private releaseDiagnosticWaiters(uri: string): void {
+    const waiters = this.diagnosticWaiters.get(uri);
+    if (!waiters) return;
+
+    this.diagnosticWaiters.delete(uri);
+    for (const waiter of waiters) waiter();
   }
 }

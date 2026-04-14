@@ -3,9 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildPreTurnLspContext,
   extractPromptPathHints,
+  filterLspGuidanceMessages,
   lspPromptGuidelines,
   lspPromptSnippet,
-} from "../lsp.ts";
+} from "../guidance.ts";
 import { LspManager } from "../manager.ts";
 import { DiagnosticSeverity } from "../types.ts";
 
@@ -78,6 +79,30 @@ describe("LSP prompt guidance", () => {
     expect(hints).toContain("lsp");
     expect(hints).toContain("lsp/manager.ts");
     expect(hints).toContain("README.md");
+  });
+
+  it("keeps only the active lsp guidance message in context", () => {
+    const messages = [
+      { customType: "lsp-guidance", details: { guidanceToken: "old" } },
+      { customType: "note", details: {} },
+      { customType: "lsp-guidance", details: { guidanceToken: "current" } },
+    ];
+
+    expect(filterLspGuidanceMessages(messages, "current")).toEqual([
+      { customType: "note", details: {} },
+      { customType: "lsp-guidance", details: { guidanceToken: "current" } },
+    ]);
+  });
+
+  it("drops stale lsp guidance entirely when there is no active token", () => {
+    const messages = [
+      { customType: "lsp-guidance", details: { guidanceToken: "old" } },
+      { customType: "note", details: {} },
+    ];
+
+    expect(filterLspGuidanceMessages(messages, null)).toEqual([
+      { customType: "note", details: {} },
+    ]);
   });
 });
 

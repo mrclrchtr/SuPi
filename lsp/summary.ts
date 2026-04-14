@@ -49,6 +49,7 @@ export function normalizeRelevantPaths(relevantPaths: string[]): string[] {
 
 export function isPathRelevant(filePath: string, relevantPaths: string[]): boolean {
   const normalizedFilePath = normalizeRelevantPath(filePath);
+  if (shouldIgnoreLspPath(normalizedFilePath)) return false;
 
   return relevantPaths.some((candidate) => {
     if (normalizedFilePath === candidate) return true;
@@ -61,6 +62,18 @@ export function isPathRelevant(filePath: string, relevantPaths: string[]): boole
     }
     return path.basename(normalizedFilePath) === candidate;
   });
+}
+
+export function shouldIgnoreLspPath(filePath: string): boolean {
+  const normalized = normalizeRelevantPath(filePath);
+  return (
+    normalized === "node_modules" ||
+    normalized.startsWith("node_modules/") ||
+    normalized.includes("/node_modules/") ||
+    normalized === ".pnpm" ||
+    normalized.startsWith(".pnpm/") ||
+    normalized.includes("/.pnpm/")
+  );
 }
 
 function normalizeRelevantPath(filePath: string): string {

@@ -1,22 +1,37 @@
 // LSP Extension for pi — provides Language Server Protocol integration.
 //
-// Gives the agent type-aware hover, go-to-definition, find-references,
+// Gives the agent type-aware hover, go-to-definition,
 // diagnostics, document-symbols, rename, and code-actions via a registered
-// `lsp` tool. Intercepts write/edit to surface blocking diagnostics inline.
+// `lsp` tool. It also keeps supported source files warm in their language
+// servers, surfaces inline diagnostics after edits/writes, and injects concise
+// semantic-first guidance into agent turns.
 //
 // Environment variables:
 //   PI_LSP_DISABLED=1        — disable all LSP functionality
 //   PI_LSP_SERVERS=a,b       — restrict to listed servers
 //   PI_LSP_SEVERITY=2        — inline severity threshold (1=error, 2=warn, 3=info, 4=hint)
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { shouldBlockSemanticBashSearch } from "./bash-guard.ts";
 import { loadConfig } from "./config.ts";
-import { formatDiagnostics } from "./diagnostics.ts";
+import {
+  buildPreTurnLspContext,
+  extractPromptPathHints,
+  filterLspGuidanceMessages,
+  lspPromptGuidelines,
+  lspPromptSnippet,
+  mergeRelevantPaths,
+} from "./guidance.ts";
 import { LspManager } from "./manager.ts";
+import { registerLspAwareToolOverrides } from "./overrides.ts";
+import {
+  persistRecentPaths,
+  restoreRecentPaths,
+  updateRecentPathsFromToolEvent,
+} from "./recent-paths.ts";
 import { executeAction, type LspAction, lspToolDescription } from "./tool-actions.ts";
+import { type LspInspectorState, toggleLspStatusOverlay, updateLspUi } from "./ui.ts";
 
 const LspActionEnum = Type.Union([
   Type.Literal("hover"),
@@ -28,133 +43,193 @@ const LspActionEnum = Type.Union([
   Type.Literal("code_actions"),
 ]);
 
-export const lspPromptSnippet =
-  "Use semantic code intelligence for hover, definitions, references, symbols, rename planning, code actions, and diagnostics in supported languages.";
-
-export const lspPromptGuidelines = [
-  "Prefer the lsp tool over bash text search for supported source files when the task is semantic code navigation or diagnostics.",
-  "Use lsp for hover, definitions, references, document symbols, rename planning, code actions, and diagnostics before falling back to grep-style shell search.",
-  "Fall back to bash/read when LSP is unavailable, the file type is unsupported, or the task is plain-text search across docs, config files, or string literals.",
-];
-
-type PreTurnContextManager = Pick<
-  LspManager,
-  | "getCoverageSummaryText"
-  | "getRelevantCoverageSummaryText"
-  | "getOutstandingDiagnosticsSummaryText"
-  | "getRelevantOutstandingDiagnosticsSummaryText"
->;
-
-type ToolTextContent = { type: "text"; text: string };
-
-type ToolResultPatch = {
-  content?: ToolTextContent[];
-  details?: unknown;
-  isError?: boolean;
-};
-
-export function buildPreTurnLspContext(
-  manager: PreTurnContextManager,
-  inlineSeverity: number,
-  relevantPaths: string[] = [],
-): string | null {
-  const diagnostics =
-    manager.getRelevantOutstandingDiagnosticsSummaryText(relevantPaths, inlineSeverity) ??
-    manager.getOutstandingDiagnosticsSummaryText(inlineSeverity);
-  if (diagnostics) {
-    return ["LSP guidance:", `- ${diagnostics}`].join("\n");
-  }
-
-  const coverage =
-    manager.getRelevantCoverageSummaryText(relevantPaths) ?? manager.getCoverageSummaryText();
-  if (!coverage) return null;
-
-  return [
-    "LSP guidance:",
-    `- ${coverage}`,
-    "- Prefer lsp for definitions, references, symbols, hover, rename planning, code actions, and diagnostics in those files.",
-  ].join("\n");
-}
-
-export function extractPromptPathHints(prompt: string, cwd: string = process.cwd()): string[] {
-  const tokens = prompt.match(/[A-Za-z0-9_./-]+/g) ?? [];
-  const matches = new Set<string>();
-
-  for (const token of tokens) {
-    const candidate = normalizePromptPathHint(token);
-    if (!candidate) continue;
-
-    const resolved = path.resolve(cwd, candidate);
-    if (!fs.existsSync(resolved)) continue;
-
-    const relative = path.relative(cwd, resolved);
-    if (relative === "") {
-      matches.add(path.basename(resolved));
-      continue;
-    }
-
-    if (!relative.startsWith(`..${path.sep}`) && relative !== "..") {
-      matches.add(relative.replaceAll(path.sep, "/"));
-    }
-  }
-
-  return Array.from(matches);
+interface LspRuntimeState {
+  manager: LspManager | null;
+  recentPaths: string[];
+  persistedRecentPaths: string[];
+  currentPrompt: string;
+  currentRelevantPaths: string[];
+  currentGuidanceToken: string | null;
+  guidanceCounter: number;
+  inlineSeverity: number;
+  inspector: LspInspectorState;
 }
 
 export default function lspExtension(pi: ExtensionAPI) {
-  // ── guard: globally disabled ────────────────────────────────────────
   if (process.env.PI_LSP_DISABLED === "1") {
-    pi.registerCommand("lsp-status", {
-      description: "Show LSP server status",
-      handler: async (_args, ctx) => {
-        ctx.ui.notify("LSP is disabled (PI_LSP_DISABLED=1)", "warning");
-      },
-    });
+    registerDisabledStatusCommand(pi);
     return;
   }
 
-  // ── state ───────────────────────────────────────────────────────────
-  let manager: LspManager | null = null;
-  let recentPaths: string[] = [];
-  const inlineSeverity = parseSeverity(process.env.PI_LSP_SEVERITY);
+  const state = createRuntimeState(parseSeverity(process.env.PI_LSP_SEVERITY));
 
-  // ── session lifecycle ───────────────────────────────────────────────
-  pi.on("session_start", async (_event, _ctx) => {
-    // Shut down any prior session's servers
-    if (manager) {
-      await manager.shutdownAll();
+  registerLspAwareToolOverrides(pi, {
+    inlineSeverity: state.inlineSeverity,
+    getManager: () => state.manager,
+    getRecentPaths: () => state.recentPaths,
+    setRecentPaths: (paths) => {
+      state.recentPaths = paths;
+      refreshRelevantPaths(state);
+    },
+    onRecentPathsChange: () => refreshRelevantPaths(state),
+  });
+
+  registerSessionLifecycleHandlers(pi, state);
+  registerBehaviorHandlers(pi, state);
+  registerLspTool(pi, state);
+  registerLspStatusCommand(pi, state);
+}
+
+function registerDisabledStatusCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("lsp-status", {
+    description: "Show LSP server status",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify("LSP is disabled (PI_LSP_DISABLED=1)", "warning");
+    },
+  });
+}
+
+function createRuntimeState(inlineSeverity: number): LspRuntimeState {
+  return {
+    manager: null,
+    recentPaths: [],
+    persistedRecentPaths: [],
+    currentPrompt: "",
+    currentRelevantPaths: [],
+    currentGuidanceToken: null,
+    guidanceCounter: 0,
+    inlineSeverity,
+    inspector: {
+      handle: null,
+      close: null,
+    },
+  };
+}
+
+function registerSessionLifecycleHandlers(pi: ExtensionAPI, state: LspRuntimeState): void {
+  pi.on("session_start", async (_event, ctx) => {
+    if (state.manager) {
+      await state.manager.shutdownAll();
     }
-    const config = loadConfig(process.cwd());
-    manager = new LspManager(config);
-    recentPaths = [];
+
+    ensureLspToolActive(pi);
+    state.manager = new LspManager(loadConfig(process.cwd()));
+    state.recentPaths = restoreRecentPaths(
+      ctx.sessionManager.getEntries() as Array<{
+        type?: string;
+        customType?: string;
+        data?: unknown;
+      }>,
+    );
+    state.persistedRecentPaths = [...state.recentPaths];
+    state.currentPrompt = "";
+    state.currentGuidanceToken = null;
+    state.guidanceCounter = 0;
+    refreshRelevantPaths(state);
+    updateLspUi(ctx, state.manager, state.inlineSeverity);
   });
 
   pi.on("session_shutdown", async () => {
-    if (manager) {
-      await manager.shutdownAll();
-      manager = null;
+    if (state.manager) {
+      await state.manager.shutdownAll();
+      state.manager = null;
     }
-    recentPaths = [];
+
+    state.inspector.close?.();
+    state.recentPaths = [];
+    state.persistedRecentPaths = [];
+    state.currentPrompt = "";
+    state.currentRelevantPaths = [];
+    state.currentGuidanceToken = null;
   });
 
-  pi.on("before_agent_start", async (event) => {
-    if (!manager) return;
+  pi.on("turn_end", async () => {
+    state.persistedRecentPaths = persistRecentPaths(
+      pi,
+      state.recentPaths,
+      state.persistedRecentPaths,
+    );
+  });
 
-    const relevantPaths = mergeRelevantPaths(extractPromptPathHints(event.prompt), recentPaths);
-    const context = buildPreTurnLspContext(manager, inlineSeverity, relevantPaths);
-    if (!context) return;
+  pi.on("agent_end", async (_event, ctx) => {
+    state.currentPrompt = "";
+    state.currentRelevantPaths = [];
+    state.currentGuidanceToken = null;
+
+    if (state.manager) {
+      updateLspUi(ctx, state.manager, state.inlineSeverity);
+    }
+  });
+}
+
+function registerBehaviorHandlers(pi: ExtensionAPI, state: LspRuntimeState): void {
+  pi.on("before_agent_start", async (event, ctx) => {
+    ensureLspToolActive(pi);
+    if (!state.manager) return;
+
+    state.manager.pruneMissingFiles();
+    state.currentPrompt = event.prompt;
+    refreshRelevantPaths(state);
+
+    const context = buildPreTurnLspContext(
+      state.manager,
+      state.inlineSeverity,
+      state.currentRelevantPaths,
+    );
+    state.currentGuidanceToken = context ? `lsp-guidance-${++state.guidanceCounter}` : null;
+    updateLspUi(ctx, state.manager, state.inlineSeverity);
+
+    if (!context || !state.currentGuidanceToken) return;
 
     return {
       message: {
         customType: "lsp-guidance",
         content: context,
         display: false,
-        details: { inlineSeverity },
+        details: {
+          guidanceToken: state.currentGuidanceToken,
+          inlineSeverity: state.inlineSeverity,
+        },
       },
     };
   });
 
-  // ── lsp tool ────────────────────────────────────────────────────────
+  pi.on("context", (event) => {
+    const messages = filterLspGuidanceMessages(
+      event.messages as Array<{ customType?: string; details?: unknown }>,
+      state.currentGuidanceToken,
+    ) as typeof event.messages;
+
+    if (messages.length === event.messages.length) return;
+    return { messages };
+  });
+
+  pi.on("tool_call", async (event) => {
+    const reason = getSemanticBashBlockReason(event.toolName, event.input, state);
+    if (reason) {
+      return { block: true, reason };
+    }
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (!state.manager) return;
+
+    if (event.toolName === "lsp") {
+      state.recentPaths = updateRecentPathsFromToolEvent(
+        event.toolName,
+        event.input,
+        state.recentPaths,
+      );
+      refreshRelevantPaths(state);
+    }
+
+    if (isLspAwareTool(event.toolName)) {
+      updateLspUi(ctx, state.manager, state.inlineSeverity);
+    }
+  });
+}
+
+function registerLspTool(pi: ExtensionAPI, state: LspRuntimeState): void {
   pi.registerTool({
     name: "lsp",
     label: "LSP",
@@ -170,14 +245,15 @@ export default function lspExtension(pi: ExtensionAPI) {
     }),
     // biome-ignore lint/complexity/useMaxParams: pi ToolDefinition.execute signature
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      if (!manager) {
+      if (!state.manager) {
         return {
           content: [{ type: "text", text: "LSP not initialized. Start a new session first." }],
           details: {},
         };
       }
+
       const text = await executeAction(
-        manager,
+        state.manager,
         params as {
           action: LspAction;
           file?: string;
@@ -186,144 +262,68 @@ export default function lspExtension(pi: ExtensionAPI) {
           newName?: string;
         },
       );
+
       return {
         content: [{ type: "text", text }],
         details: {},
       };
     },
   });
+}
 
-  // ── write/edit interception ─────────────────────────────────────────
-  pi.on("tool_result", async (event) => {
-    if (!manager) return;
-
-    recentPaths = updateRecentPathsFromToolEvent(event.toolName, event.input, recentPaths);
-
-    if (event.toolName !== "write" && event.toolName !== "edit") return;
-    const filePath = getFilePathFromToolEvent(event.toolName, event.input);
-    if (!filePath) return;
-
-    return appendInlineDiagnostics(manager, filePath, inlineSeverity, event.content);
-  });
-
-  // ── /lsp-status command ─────────────────────────────────────────────
+function registerLspStatusCommand(pi: ExtensionAPI, state: LspRuntimeState): void {
   pi.registerCommand("lsp-status", {
-    description: "Show LSP server status, open files, and diagnostics",
-    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: simple sequential logic
+    description: "Show active LSP servers, open files, and diagnostics",
     handler: async (_args, ctx) => {
-      if (!manager) {
+      if (!state.manager) {
         ctx.ui.notify("LSP not initialized", "warning");
         return;
       }
-      const status = manager.getStatus();
-      const lines: string[] = ["## LSP Status\n"];
 
-      if (status.servers.length === 0) {
-        lines.push("No LSP servers active.\n");
-      } else {
-        for (const s of status.servers) {
-          const icon = s.status === "running" ? "🟢" : s.status === "error" ? "🔴" : "⚪";
-          lines.push(`${icon} **${s.name}** — ${s.status} (root: ${s.root})`);
-          lines.push(`   Files: ${s.openFiles.join(", ") || "none"}`);
-        }
-      }
-
-      const diagSummary = manager.getDiagnosticSummary();
-      if (diagSummary.length > 0) {
-        lines.push("\n### Diagnostics");
-        for (const d of diagSummary) {
-          lines.push(`- **${d.file}**: ${d.errors} error(s), ${d.warnings} warning(s)`);
-        }
-      }
-
-      ctx.ui.notify(lines.join("\n"), "info");
+      toggleLspStatusOverlay(ctx, state.manager, state.inlineSeverity, state.inspector);
     },
   });
 }
 
-async function appendInlineDiagnostics(
-  manager: LspManager,
-  filePath: string,
-  inlineSeverity: number,
-  content: unknown,
-): Promise<ToolResultPatch | undefined> {
-  try {
-    const diags = await manager.syncFileAndGetDiagnostics(filePath, inlineSeverity);
-    if (diags.length === 0) return;
-
-    const existing = Array.isArray(content) ? (content as ToolTextContent[]) : [];
-    const diagText = formatDiagnostics(filePath, diags);
-    return {
-      content: [
-        ...existing,
-        { type: "text" as const, text: `\n\n⚠️ LSP Diagnostics:\n${diagText}` },
-      ],
-    };
-  } catch {
-    // Never block the agent on LSP errors
-    return;
-  }
+function refreshRelevantPaths(state: LspRuntimeState): void {
+  state.currentRelevantPaths = mergeRelevantPaths(
+    extractPromptPathHints(state.currentPrompt),
+    state.recentPaths,
+  );
 }
 
-function updateRecentPathsFromToolEvent(
+function getSemanticBashBlockReason(
   toolName: string,
   input: Record<string, unknown>,
-  recentPaths: string[],
-): string[] {
-  const filePath = getFilePathFromToolEvent(toolName, input);
-  return filePath ? trackRecentPath(recentPaths, filePath) : recentPaths;
+  state: LspRuntimeState,
+): string | null {
+  if (!state.manager || toolName !== "bash") return null;
+  if (typeof input.command !== "string") return null;
+
+  const hasRelevantCoverage =
+    state.currentRelevantPaths.length > 0 &&
+    state.manager.getRelevantCoverageSummaryText(state.currentRelevantPaths) !== null;
+
+  return shouldBlockSemanticBashSearch(
+    input.command,
+    state.currentPrompt,
+    state.currentRelevantPaths,
+    hasRelevantCoverage,
+  );
 }
 
-function getFilePathFromToolEvent(toolName: string, input: Record<string, unknown>): string | null {
-  if (
-    (toolName === "read" || toolName === "write" || toolName === "edit") &&
-    typeof input.path === "string"
-  ) {
-    return normalizeTrackedPath(input.path);
-  }
-
-  if (toolName === "lsp" && typeof input.file === "string") {
-    return normalizeTrackedPath(input.file);
-  }
-
-  return null;
+function isLspAwareTool(toolName: string): boolean {
+  return toolName === "lsp" || toolName === "read" || toolName === "write" || toolName === "edit";
 }
 
-function trackRecentPath(
-  recentPaths: string[],
-  filePath: string,
-  maxEntries: number = 6,
-): string[] {
-  const normalized = normalizeTrackedPath(filePath);
-  const next = [normalized, ...recentPaths.filter((entry) => entry !== normalized)];
-  return next.slice(0, maxEntries);
-}
-
-function normalizeTrackedPath(filePath: string): string {
-  const resolved = path.resolve(filePath);
-  const relative = path.relative(process.cwd(), resolved);
-  if (relative === "") return path.basename(resolved);
-  if (relative.startsWith(`..${path.sep}`) || relative === "..") return path.basename(resolved);
-  return relative.replaceAll(path.sep, "/");
-}
-
-function normalizePromptPathHint(token: string): string | null {
-  const cleaned = token.replace(/^[`'"([]+|[`'"),.:;\]]+$/g, "");
-  if (cleaned.length < 2) return null;
-  return cleaned;
-}
-
-function mergeRelevantPaths(
-  promptPaths: string[],
-  recentPaths: string[],
-  maxEntries: number = 8,
-): string[] {
-  return Array.from(new Set([...promptPaths, ...recentPaths])).slice(0, maxEntries);
+function ensureLspToolActive(pi: ExtensionAPI): void {
+  const activeTools = pi.getActiveTools();
+  if (activeTools.includes("lsp")) return;
+  pi.setActiveTools([...activeTools, "lsp"]);
 }
 
 function parseSeverity(env: string | undefined): number {
-  if (!env) return 1; // default: errors only
-  const n = parseInt(env, 10);
-  if (n >= 1 && n <= 4) return n;
-  return 1;
+  if (!env) return 1;
+  const parsed = parseInt(env, 10);
+  return parsed >= 1 && parsed <= 4 ? parsed : 1;
 }

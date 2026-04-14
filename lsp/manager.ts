@@ -5,13 +5,20 @@ import * as path from "node:path";
 import { LspClient } from "./client.ts";
 import { getServerForFile } from "./config.ts";
 import {
+  accumulateOutstandingDiagnostics,
+  collectDiagnosticSummaryCounts,
+  createOutstandingDiagnosticSummary,
+  relativeFilePathFromUri,
+} from "./diagnostic-summary.ts";
+import {
   displayRelativeFilePath,
   formatCoverageSummaryText,
   formatOutstandingDiagnosticsSummaryText,
   isPathRelevant,
   normalizeRelevantPaths,
+  shouldIgnoreLspPath,
 } from "./summary.ts";
-import { type Diagnostic, DiagnosticSeverity, type LspConfig } from "./types.ts";
+import type { Diagnostic, LspConfig } from "./types.ts";
 import { commandExists, findProjectRoot } from "./utils.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -131,11 +138,32 @@ export class LspManager {
     try {
       content = fs.readFileSync(resolvedPath, "utf-8");
     } catch {
+      this.closeFile(resolvedPath);
       return [];
     }
 
     const diagnostics = await client.syncAndWaitForDiagnostics(resolvedPath, content);
     return diagnostics.filter((d) => d.severity !== undefined && d.severity <= maxSeverity);
+  }
+
+  /** Close a file across any active LSP clients and clear its cached diagnostics. */
+  closeFile(filePath: string): void {
+    const resolvedPath = path.resolve(filePath);
+    for (const client of this.clients.values()) {
+      client.didClose(resolvedPath);
+    }
+  }
+
+  /** Remove any missing files from open-document and diagnostic state. */
+  pruneMissingFiles(): string[] {
+    const removed: string[] = [];
+    for (const client of this.clients.values()) {
+      const prune = (client as unknown as { pruneMissingFiles?: () => string[] }).pruneMissingFiles;
+      if (typeof prune === "function") {
+        removed.push(...prune.call(client));
+      }
+    }
+    return removed;
   }
 
   /** Shut down all running LSP servers. */
@@ -148,6 +176,7 @@ export class LspManager {
 
   /** Get status of all servers. */
   getStatus(): ManagerStatus {
+    this.pruneMissingFiles();
     const servers: ServerStatus[] = [];
     for (const [_key, client] of this.clients) {
       servers.push({
@@ -162,6 +191,7 @@ export class LspManager {
 
   /** Get configured and active LSP coverage for the current project. */
   getCoverageSummary(): CoverageSummaryEntry[] {
+    this.pruneMissingFiles();
     const activeServers = new Map<string, { active: boolean; openFiles: number }>();
 
     for (const server of this.getStatus().servers) {
@@ -191,6 +221,7 @@ export class LspManager {
 
   /** Get active LSP coverage summarized by running servers with open files. */
   getActiveCoverageSummary(): ActiveCoverageSummaryEntry[] {
+    this.pruneMissingFiles();
     const activeServers = new Map<string, Set<string>>();
 
     for (const server of this.getStatus().servers) {
@@ -198,7 +229,9 @@ export class LspManager {
 
       const openFiles = activeServers.get(server.name) ?? new Set<string>();
       for (const file of server.openFiles) {
-        openFiles.add(displayRelativeFilePath(file));
+        const relativeFile = displayRelativeFilePath(file);
+        if (shouldIgnoreLspPath(relativeFile)) continue;
+        openFiles.add(relativeFile);
       }
       activeServers.set(server.name, openFiles);
     }
@@ -237,33 +270,27 @@ export class LspManager {
 
   /** Get a diagnostic summary across all servers and files. */
   getDiagnosticSummary(): DiagnosticSummary[] {
+    this.pruneMissingFiles();
     const fileDiags = new Map<string, { errors: number; warnings: number }>();
 
     for (const client of this.clients.values()) {
       for (const entry of client.getAllDiagnostics()) {
-        const file = relativeFilePathFromUri(entry.uri);
-        const current = fileDiags.get(file) ?? { errors: 0, warnings: 0 };
-        for (const d of entry.diagnostics) {
-          if (d.severity === DiagnosticSeverity.Error) current.errors++;
-          else if (d.severity === DiagnosticSeverity.Warning) current.warnings++;
-        }
-        fileDiags.set(file, current);
+        collectDiagnosticSummaryCounts(fileDiags, entry);
       }
     }
 
-    return Array.from(fileDiags.entries()).map(([file, counts]) => ({
-      file,
-      ...counts,
-    }));
+    return Array.from(fileDiags.entries()).map(([file, counts]) => ({ file, ...counts }));
   }
 
   /** Get outstanding diagnostics at or above the configured inline threshold. */
   getOutstandingDiagnosticSummary(maxSeverity: number = 1): OutstandingDiagnosticSummaryEntry[] {
+    this.pruneMissingFiles();
     const fileDiags = new Map<string, OutstandingDiagnosticSummaryEntry>();
 
     for (const client of this.clients.values()) {
       for (const entry of client.getAllDiagnostics()) {
         const file = relativeFilePathFromUri(entry.uri);
+        if (shouldIgnoreLspPath(file)) continue;
         const current = fileDiags.get(file) ?? createOutstandingDiagnosticSummary(file);
         const next = accumulateOutstandingDiagnostics(current, entry.diagnostics, maxSeverity);
 
@@ -324,56 +351,8 @@ export class LspManager {
       client.didOpen(resolvedPath, content);
       return client;
     } catch {
+      this.closeFile(resolvedPath);
       return null;
     }
   }
-}
-
-function relativeFilePathFromUri(uri: string): string {
-  return displayRelativeFilePath(uri.replace("file://", ""));
-}
-
-function createOutstandingDiagnosticSummary(file: string): OutstandingDiagnosticSummaryEntry {
-  return {
-    file,
-    total: 0,
-    errors: 0,
-    warnings: 0,
-    information: 0,
-    hints: 0,
-  };
-}
-
-function accumulateOutstandingDiagnostics(
-  current: OutstandingDiagnosticSummaryEntry,
-  diagnostics: Diagnostic[],
-  maxSeverity: number,
-): OutstandingDiagnosticSummaryEntry {
-  const next = { ...current };
-
-  for (const diagnostic of diagnostics) {
-    if (!isDiagnosticWithinThreshold(diagnostic, maxSeverity)) continue;
-
-    next.total++;
-    incrementOutstandingDiagnosticCount(next, diagnostic.severity);
-  }
-
-  return next;
-}
-
-function isDiagnosticWithinThreshold(
-  diagnostic: Diagnostic,
-  maxSeverity: number,
-): diagnostic is Diagnostic & { severity: number } {
-  return diagnostic.severity !== undefined && diagnostic.severity <= maxSeverity;
-}
-
-function incrementOutstandingDiagnosticCount(
-  entry: OutstandingDiagnosticSummaryEntry,
-  severity: number,
-): void {
-  if (severity === DiagnosticSeverity.Error) entry.errors++;
-  else if (severity === DiagnosticSeverity.Warning) entry.warnings++;
-  else if (severity === DiagnosticSeverity.Information) entry.information++;
-  else if (severity === DiagnosticSeverity.Hint) entry.hints++;
 }
