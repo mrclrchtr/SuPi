@@ -30,11 +30,17 @@ pnpm biome:ai
 # Auto-fix lint/format issues, then verify
 pnpm biome:fix && pnpm biome:ai
 
+# Fix formatting/imports on only the files you touched
+pnpm exec biome check --write <files...>
+
 # Scannable biome error list (one line per issue)
 pnpm biome:ci --colors=off 2>&1 | grep '\.ts:'
 
 # Run all tests (unit + integration)
 pnpm test
+
+# Fast smoke test for LSP guidance/relevance changes
+pnpm exec vitest run lsp/__tests__/guidance.test.ts
 
 # Watch mode
 pnpm test:watch
@@ -86,6 +92,7 @@ export default function (pi: ExtensionAPI) {
 - `pi.on("session_start", (event, ctx) => …)` — fires when a session begins
 - `pi.on("tool_call", async (event) => …)` — intercepts LLM tool calls; mutate `event.input` to override parameters
 - `pi.on("input", (event) => …)` — intercepts user input before agent processing; return `{ action: "transform", text }` to rewrite it or `{ action: "continue" }` to pass through
+- `pi.on("before_agent_start", (event) => …)` — inject per-turn steering/context; use `message.display = false` for hidden guidance
 - `pi.getCommands()` — returns all registered commands; `c.source === "skill"` identifies skill commands
 - `ctx.shutdown()` — exits the session
 - `ctx.ui.setWidget(id, lines)` — shows/clears a persistent UI widget
@@ -97,7 +104,7 @@ export default function (pi: ExtensionAPI) {
 
 ### LSP extension
 
-Provides Language Server Protocol integration — type-aware hover, go-to-definition, find-references, diagnostics, rename, code-actions, and document-symbols via a registered `lsp` tool. Intercepts `write`/`edit` to surface blocking diagnostics inline.
+Provides Language Server Protocol integration — type-aware hover, go-to-definition, find-references, diagnostics, rename, code-actions, and document-symbols via a registered `lsp` tool. Intercepts `write`/`edit` to surface blocking diagnostics inline. The tool also advertises semantic-first guidance via `promptSnippet`/`promptGuidelines` and injects compact pre-turn LSP coverage + outstanding diagnostics context in `before_agent_start`.
 
 Files: `lsp/lsp.ts` (entry), `lsp/client.ts` (LSP client lifecycle), `lsp/transport.ts` (JSON-RPC), `lsp/config.ts` (server config), `lsp/manager.ts` (server pool), `lsp/tool-actions.ts` (tool dispatch), `lsp/diagnostics.ts` (formatting), `lsp/utils.ts` (URI/language/path utils), `lsp/types.ts` (LSP types), `lsp/defaults.json` (server definitions).
 
@@ -153,6 +160,7 @@ Key docs to reach for first:
 - **`ctx.ui.notify()` level is `"warning"` not `"warn"`**: valid values are `"error" | "warning" | "info"`.
 - **`pi.on("tool_result")` modifies results; `pi.on("tool_call")` only blocks**: use `tool_result` to append diagnostics or context to tool output. Return `{ content, details, isError }` to patch.
 - **Session cleanup event is `session_shutdown`** not `session_end`: use for tearing down subprocesses, connections, etc.
+- **Local `pi install /path` uses the working tree directly**: confirm the active package path in `~/.pi/agent/settings.json`, then use `/reload` or restart pi after edits.
 - **JSON imports**: avoid `import X from "./file.json" with { type: "json" }` — it errors under some tsconfig modes. Use `JSON.parse(fs.readFileSync(path.join(__dirname, "file.json"), "utf-8"))` instead. pi's jiti loader always provides `__dirname`.
 - **openspec PostHog errors are harmless**: the CLI emits `PostHogFetchNetworkError` when offline — ignore.
 - **Biome config is `biome.jsonc`** (not `biome.json`): all rule overrides go there. Inline `biome-ignore` comments don't work for file-level nursery rules like `noExcessiveLinesPerFile` — must split the file or raise the threshold in `biome.jsonc`.
@@ -160,4 +168,9 @@ Key docs to reach for first:
 - **`skill-shortcut` needs `biome-ignore` for `noExplicitAny`**: the `as any` casts accessing private TUI internals are intentional — each needs an inline `// biome-ignore lint/suspicious/noExplicitAny: accessing private TUI internals` comment.
 - **Test framework is vitest**: unit tests at `lsp/__tests__/*.test.ts`, integration tests at `*.integration.test.ts`. Integration tests use `describe.skipIf(!HAS_CMD)` to auto-skip when LSP servers aren't on PATH.
 - **Always run `biome check --write` on new test files**: biome enforces import order and formatting that won't match hand-written code. Fix first, then verify with `biome:ai`.
+- **Biome complexity trips quickly in `lsp/manager.ts`**: prefer small helper functions for summary/aggregation logic before reaching for suppressions.
+- **`lsp/summary.ts` holds formatting/relevance helpers**: keep `lsp/manager.ts` focused on state/server management to stay under Biome file-length limits.
+- **Keep `before_agent_start` guidance stateful**: generic LSP preference belongs in `promptSnippet`/`promptGuidelines`; pre-turn messages should only add actionable diagnostics or relevant active coverage.
+- **Probe live LSP behavior with a temporary TS error file**: writing `lsp/__tmp_guidance_probe.ts` with an intentional type error exercises both `tool_result` diagnostics and pre-turn guidance.
+- **Unit-test LSP manager summaries with fake clients**: cast `manager as unknown as { clients: Map<...> }` to seed coverage/diagnostics; keep real server behavior in `*.integration.test.ts`.
 - **Unhandled promise rejections fail vitest**: if production code rejects promises during cleanup (e.g., `dispose()`), add `promise.catch(() => {})` at creation to prevent vitest from catching them as test errors.
