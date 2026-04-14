@@ -23,6 +23,24 @@ const HAS_TS_LSP = hasCommand("typescript-language-server") && hasCommand("tsser
 
 let tmpDir: string;
 
+async function waitForDiagnostics(
+  manager: LspManager,
+  filePath: string,
+  maxSeverity: number,
+): Promise<Diagnostic[]> {
+  const maxAttempts = 5;
+  const retryDelayMs = 250;
+  let diagnostics: Diagnostic[] = [];
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    diagnostics = await manager.syncFileAndGetDiagnostics(filePath, maxSeverity);
+    if (diagnostics.length > 0) return diagnostics;
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+
+  return diagnostics;
+}
+
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-manager-integration-"));
 
@@ -87,7 +105,7 @@ describe.skipIf(!HAS_TS_LSP)("LspManager integration", () => {
 
   it("syncs file and returns error diagnostics", async () => {
     const brokenFile = path.join(tmpDir, "broken.ts");
-    const diags = await manager.syncFileAndGetDiagnostics(brokenFile, 1);
+    const diags = await waitForDiagnostics(manager, brokenFile, 1);
 
     expect(diags.length).toBeGreaterThan(0);
     expect(diags.every((d: Diagnostic) => d.severity === 1)).toBe(true);
@@ -101,8 +119,8 @@ describe.skipIf(!HAS_TS_LSP)("LspManager integration", () => {
 
   it("includes warnings when severity threshold raised", async () => {
     const brokenFile = path.join(tmpDir, "broken.ts");
-    const diagsErrors = await manager.syncFileAndGetDiagnostics(brokenFile, 1);
-    const diagsAll = await manager.syncFileAndGetDiagnostics(brokenFile, 4);
+    const diagsErrors = await waitForDiagnostics(manager, brokenFile, 1);
+    const diagsAll = await waitForDiagnostics(manager, brokenFile, 4);
     expect(diagsAll.length).toBeGreaterThanOrEqual(diagsErrors.length);
   }, 10_000);
 
