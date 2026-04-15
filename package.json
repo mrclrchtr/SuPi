@@ -41,11 +41,12 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p lsp/__tests__/tsconfig.json",
     "pack:check": "npm pack --dry-run",
     "release": "semantic-release",
     "check": "pnpm biome",
     "check:fix": "pnpm biome:fix",
-    "verify": "pnpm typecheck && pnpm biome:ai && pnpm test && pnpm pack:check",
+    "verify": "pnpm typecheck && pnpm typecheck:tests && pnpm biome:ai && pnpm test && pnpm pack:check",
     "test": "vitest run",
     "test:watch": "vitest"
   },

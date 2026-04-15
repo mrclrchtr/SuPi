@@ -8,16 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../config.ts";
 import { LspManager } from "../manager.ts";
 import type { Diagnostic } from "../types.ts";
-
-function hasCommand(cmd: string): boolean {
-  try {
-    const { execSync } = require("node:child_process");
-    execSync(`which ${cmd}`, { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { hasCommand, waitFor } from "./integration-utils.ts";
 
 const HAS_TS_LSP = hasCommand("typescript-language-server") && hasCommand("tsserver");
 
@@ -28,17 +19,11 @@ async function waitForDiagnostics(
   filePath: string,
   maxSeverity: number,
 ): Promise<Diagnostic[]> {
-  const maxAttempts = 5;
-  const retryDelayMs = 250;
-  let diagnostics: Diagnostic[] = [];
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    diagnostics = await manager.syncFileAndGetDiagnostics(filePath, maxSeverity);
-    if (diagnostics.length > 0) return diagnostics;
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-  }
-
-  return diagnostics;
+  return waitFor(
+    () => manager.syncFileAndGetDiagnostics(filePath, maxSeverity),
+    (diagnostics) => diagnostics.length > 0,
+    { timeoutMs: 1_500, retryDelayMs: 250, label: `diagnostics for ${path.basename(filePath)}` },
+  );
 }
 
 beforeAll(() => {

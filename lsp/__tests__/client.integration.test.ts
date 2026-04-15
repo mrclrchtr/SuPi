@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LspClient } from "../client.ts";
 import type { Diagnostic, ServerConfig } from "../types.ts";
+import { hasCommand, waitFor } from "./integration-utils.ts";
 
 const TS_SERVER_CONFIG: ServerConfig = {
   command: "typescript-language-server",
@@ -21,16 +22,6 @@ const TS_SERVER_CONFIG: ServerConfig = {
 let tmpDir: string;
 let goodFile: string;
 let badFile: string;
-
-function hasCommand(cmd: string): boolean {
-  try {
-    const { execSync } = require("node:child_process");
-    execSync(`which ${cmd}`, { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 const HAS_TS_LSP = hasCommand("typescript-language-server") && hasCommand("tsserver");
 
@@ -99,11 +90,15 @@ describe.skipIf(!HAS_TS_LSP)("LspClient integration (typescript-language-server)
     fs.writeFileSync(refFile, 'import { add } from "./good";\nconst result = add(1, 2);\n');
     client.didOpen(refFile, fs.readFileSync(refFile, "utf-8"));
 
-    // Wait for server to process
-    await sleep(1000);
-
-    // Go to definition of "add" on line 2, col ~16
-    const def = await client.definition(refFile, { line: 1, character: 15 });
+    // Wait for the language server to answer a real definition request instead
+    // of sleeping a fixed amount of time. LSP definition returns null, a single
+    // Location, or an array of Locations — we need a non-null, non-empty array
+    // response to be sure indexing has completed.
+    const def = await waitFor(
+      () => client.definition(refFile, { line: 1, character: 15 }),
+      (definition) => definition !== null && (!Array.isArray(definition) || definition.length > 0),
+      { timeoutMs: 5_000, retryDelayMs: 100, label: "definition of 'add' in ref.ts" },
+    );
     expect(def).not.toBeNull();
   }, 10_000);
 
@@ -177,9 +172,3 @@ describe.skipIf(!HAS_TS_LSP)("LspClient integration (typescript-language-server)
     expect(client.status).toBe("shutdown");
   }, 10_000);
 });
-
-// ── Helper ────────────────────────────────────────────────────────────
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

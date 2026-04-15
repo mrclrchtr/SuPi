@@ -8,16 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../config.ts";
 import { LspManager } from "../manager.ts";
 import { executeAction } from "../tool-actions.ts";
-
-function hasCommand(cmd: string): boolean {
-  try {
-    const { execSync } = require("node:child_process");
-    execSync(`which ${cmd}`, { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { hasCommand, waitFor } from "./integration-utils.ts";
 
 const HAS_TS_LSP = hasCommand("typescript-language-server") && hasCommand("tsserver");
 
@@ -63,16 +54,28 @@ afterAll(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+async function warmUpToolActionManager(manager: LspManager): Promise<void> {
+  await manager.ensureFileOpen(goodFile);
+  await waitFor(
+    () =>
+      executeAction(manager, {
+        action: "hover",
+        file: goodFile,
+        line: 1,
+        character: 17,
+      }),
+    (result) => result.includes("add"),
+    { timeoutMs: 5_000, retryDelayMs: 100, label: "hover on 'add' symbol during warm-up" },
+  );
+}
+
 describe.skipIf(!HAS_TS_LSP)("tool-actions integration", () => {
   let manager: LspManager;
 
   beforeAll(async () => {
     const config = loadConfig(tmpDir);
     manager = new LspManager(config);
-    // Warm up the server by opening a file
-    await manager.ensureFileOpen(goodFile);
-    // Give server time to index
-    await new Promise((r) => setTimeout(r, 2000));
+    await warmUpToolActionManager(manager);
   }, 20_000);
 
   afterAll(async () => {
