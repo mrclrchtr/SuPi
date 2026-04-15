@@ -125,9 +125,9 @@ export default function (pi: ExtensionAPI) {
 
 ### LSP extension
 
-Provides Language Server Protocol integration — type-aware hover, go-to-definition, find-references, diagnostics, rename, code-actions, and document-symbols via a registered `lsp` tool. Intercepts `write`/`edit` to surface blocking diagnostics inline. The tool also advertises semantic-first guidance via `promptSnippet`/`promptGuidelines` and injects compact pre-turn LSP coverage + outstanding diagnostics context in `before_agent_start`.
+Provides Language Server Protocol integration — type-aware hover, go-to-definition, find-references, diagnostics, rename, code-actions, and document-symbols via a registered `lsp` tool. Intercepts `write`/`edit` to surface blocking diagnostics inline. The tool advertises semantic-first guidance via `promptSnippet`/`promptGuidelines` as always-on discoverability. Runtime pre-turn guidance in `before_agent_start` is stateful and dormant by default: it activates only after qualifying source interactions (`read`, `edit`, `write`, `lsp` on a supported file type) and re-injects only when the activation hint is pending or tracked-file diagnostics change.
 
-Files: `lsp/lsp.ts` (entry), `lsp/client.ts` (LSP client lifecycle), `lsp/transport.ts` (JSON-RPC), `lsp/config.ts` (server config), `lsp/manager.ts` (server pool), `lsp/tool-actions.ts` (tool dispatch), `lsp/diagnostics.ts` (formatting), `lsp/utils.ts` (URI/language/path utils), `lsp/types.ts` (LSP types), `lsp/defaults.json` (server definitions).
+Files: `lsp/lsp.ts` (entry), `lsp/client.ts` (LSP client lifecycle), `lsp/transport.ts` (JSON-RPC), `lsp/config.ts` (server config), `lsp/manager.ts` (server pool), `lsp/runtime-state.ts` (runtime guidance state), `lsp/guidance.ts` (message formatting), `lsp/tool-actions.ts` (tool dispatch), `lsp/diagnostics.ts` (formatting), `lsp/utils.ts` (URI/language/path utils), `lsp/types.ts` (LSP types), `lsp/defaults.json` (server definitions).
 
 Commands: `/lsp-status` — shows active servers, open files, and diagnostics summary.
 

@@ -1,11 +1,13 @@
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  buildPreTurnLspContext,
+  buildRuntimeLspGuidance,
+  computeTrackedDiagnosticsSummary,
   extractPromptPathHints,
   filterLspGuidanceMessages,
   lspPromptGuidelines,
   lspPromptSnippet,
+  runtimeGuidanceFingerprint,
 } from "../guidance.ts";
 import { LspManager } from "../manager.ts";
 import { DiagnosticSeverity } from "../types.ts";
@@ -17,58 +19,111 @@ describe("LSP prompt guidance", () => {
     expect(lspPromptGuidelines.join(" ")).toContain("Fall back to bash/read");
   });
 
-  it("prefers diagnostics-only pre-turn context when relevant diagnostics exist", () => {
-    const context = buildPreTurnLspContext(
+  it("emits a compact activation hint when runtime LSP context first activates", () => {
+    const content = buildRuntimeLspGuidance({
+      pendingActivation: true,
+      diagnosticsSummary: null,
+      trackedFiles: ["lsp/lsp.ts", "lsp/manager.ts"],
+    });
+
+    expect(content).toContain("LSP guidance:");
+    expect(content).toContain("LSP ready for semantic navigation");
+    expect(content).toContain("lsp/lsp.ts");
+    expect(content).not.toContain("Active LSP coverage");
+    expect(content).not.toContain("Prefer lsp for definitions");
+  });
+
+  it("emits changed diagnostics summary without restating generic coverage", () => {
+    const content = buildRuntimeLspGuidance({
+      pendingActivation: false,
+      diagnosticsSummary: "Outstanding LSP diagnostics: lsp/manager.ts (1 error).",
+      trackedFiles: ["lsp/manager.ts"],
+    });
+
+    expect(content).toContain("Outstanding LSP diagnostics: lsp/manager.ts (1 error).");
+    expect(content).not.toContain("Active LSP coverage");
+  });
+
+  it("emits a tracking line for tracked files when activation has been consumed", () => {
+    const content = buildRuntimeLspGuidance({
+      pendingActivation: false,
+      diagnosticsSummary: null,
+      trackedFiles: ["lsp/lsp.ts"],
+    });
+
+    expect(content).toContain("LSP guidance:");
+    expect(content).toContain("LSP tracking source files: lsp/lsp.ts.");
+    expect(content).not.toContain("LSP ready");
+  });
+
+  it("returns null when runtime LSP context is dormant (no tracked files)", () => {
+    const content = buildRuntimeLspGuidance({
+      pendingActivation: false,
+      diagnosticsSummary: null,
+      trackedFiles: [],
+    });
+
+    expect(content).toBeNull();
+  });
+
+  it("fingerprint reflects diagnostics and tracked files but not activation", () => {
+    const base = {
+      pendingActivation: false,
+      diagnosticsSummary: "Outstanding LSP diagnostics: lsp/manager.ts (1 error).",
+      trackedFiles: ["lsp/manager.ts"],
+    };
+
+    expect(runtimeGuidanceFingerprint(base)).toBe(runtimeGuidanceFingerprint(base));
+    // Activation is one-shot — excluding it keeps the fingerprint comparable.
+    expect(runtimeGuidanceFingerprint(base)).toBe(
+      runtimeGuidanceFingerprint({ ...base, pendingActivation: true }),
+    );
+    // Diagnostics changes register.
+    expect(runtimeGuidanceFingerprint(base)).not.toBe(
+      runtimeGuidanceFingerprint({
+        ...base,
+        diagnosticsSummary: "Outstanding LSP diagnostics: lsp/manager.ts (2 errors).",
+      }),
+    );
+    // Tracked-file changes register so multi-file workflows refresh guidance.
+    expect(runtimeGuidanceFingerprint(base)).not.toBe(
+      runtimeGuidanceFingerprint({ ...base, trackedFiles: ["lsp/manager.ts", "lsp/lsp.ts"] }),
+    );
+    // Reordering the same tracked-file set must not change the fingerprint —
+    // re-touching a tracked file moves it to the front but shouldn't re-inject.
+    expect(
+      runtimeGuidanceFingerprint({ ...base, trackedFiles: ["lsp/manager.ts", "lsp/lsp.ts"] }),
+    ).toBe(runtimeGuidanceFingerprint({ ...base, trackedFiles: ["lsp/lsp.ts", "lsp/manager.ts"] }));
+  });
+
+  it("tracked diagnostics summary is null when no paths are tracked", () => {
+    const summary = computeTrackedDiagnosticsSummary(
       {
-        getCoverageSummaryText: () =>
-          "Active LSP coverage: typescript-language-server (2 open files: lsp/lsp.ts, lsp/manager.ts).",
-        getRelevantCoverageSummaryText: () =>
-          "Active LSP coverage: typescript-language-server (1 open file: lsp/manager.ts).",
-        getOutstandingDiagnosticsSummaryText: () =>
-          "Outstanding LSP diagnostics: lsp/manager.ts (1 error).",
-        getRelevantOutstandingDiagnosticsSummaryText: () =>
-          "Outstanding LSP diagnostics: lsp/manager.ts (1 error).",
+        getRelevantOutstandingDiagnosticsSummaryText: () => {
+          throw new Error("should not be called when tracked set is empty");
+        },
       },
       1,
+      [],
+    );
+
+    expect(summary).toBeNull();
+  });
+
+  it("tracked diagnostics summary delegates to the manager for tracked paths", () => {
+    const summary = computeTrackedDiagnosticsSummary(
+      {
+        getRelevantOutstandingDiagnosticsSummaryText: (paths, severity) => {
+          expect(paths).toEqual(["lsp/manager.ts"]);
+          expect(severity).toBe(2);
+          return "Outstanding LSP diagnostics: lsp/manager.ts (1 error).";
+        },
+      },
+      2,
       ["lsp/manager.ts"],
     );
 
-    expect(context).toContain("LSP guidance:");
-    expect(context).toContain("Outstanding LSP diagnostics: lsp/manager.ts (1 error).");
-    expect(context).not.toContain("Active LSP coverage");
-    expect(context).not.toContain("Prefer lsp for definitions");
-  });
-
-  it("falls back to active coverage when there are no relevant diagnostics", () => {
-    const context = buildPreTurnLspContext(
-      {
-        getCoverageSummaryText: () =>
-          "Active LSP coverage: typescript-language-server (2 open files: lsp/lsp.ts, lsp/manager.ts).",
-        getRelevantCoverageSummaryText: () =>
-          "Active LSP coverage: typescript-language-server (1 open file: lsp/manager.ts).",
-        getOutstandingDiagnosticsSummaryText: () => null,
-        getRelevantOutstandingDiagnosticsSummaryText: () => null,
-      },
-      1,
-      ["lsp/manager.ts"],
-    );
-
-    expect(context).toContain("Active LSP coverage");
-    expect(context).toContain("Prefer lsp for definitions");
-  });
-
-  it("omits pre-turn context when there is nothing useful to report", () => {
-    const context = buildPreTurnLspContext(
-      {
-        getCoverageSummaryText: () => null,
-        getRelevantCoverageSummaryText: () => null,
-        getOutstandingDiagnosticsSummaryText: () => null,
-        getRelevantOutstandingDiagnosticsSummaryText: () => null,
-      },
-      1,
-    );
-
-    expect(context).toBeNull();
+    expect(summary).toBe("Outstanding LSP diagnostics: lsp/manager.ts (1 error).");
   });
 
   it("extracts existing path hints from prompts", () => {

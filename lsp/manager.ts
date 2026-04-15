@@ -68,10 +68,48 @@ export class LspManager {
   private clients = new Map<string, LspClient>();
   /** Servers we've already tried and failed to start */
   private unavailable = new Set<string>();
+  /** Memoized per-command availability of LSP server binaries on PATH */
+  private commandAvailability = new Map<string, boolean>();
 
   constructor(private readonly config: LspConfig) {}
 
   // ── Public API ────────────────────────────────────────────────────
+
+  /**
+   * Synchronously check whether a file path maps to a configured LSP server
+   * whose binary is actually installed and has not already failed to start.
+   * Used by tool-event activation so we don't advertise LSP readiness for
+   * files whose server cannot run in this environment.
+   */
+  isSupportedSourceFile(filePath: string): boolean {
+    // Dependency directories are intentionally excluded from recent-path
+    // tracking and diagnostic summaries (shouldIgnoreLspPath). Keep runtime
+    // guidance activation consistent: reading or editing a file under
+    // node_modules / .pnpm must not arm LSP guidance for dependency sources.
+    if (shouldIgnoreLspPath(filePath)) return false;
+    const match = getServerForFile(this.config, filePath);
+    if (!match) return false;
+    const [serverName, serverConfig] = match;
+    // Mirror getClientForFile's root resolution so the unavailable check stays
+    // root-specific. A failed startup in one workspace must not suppress
+    // activation for unrelated roots served by the same language server.
+    const fileDir = path.dirname(path.resolve(filePath));
+    const root = findProjectRoot(fileDir, serverConfig.rootMarkers, process.cwd());
+    if (this.unavailable.has(`${serverName}:${root}`)) return false;
+    return this.isServerCommandAvailable(serverConfig.command);
+  }
+
+  private isServerCommandAvailable(command: string): boolean {
+    // Only memoize positive lookups. A negative result may become stale if the
+    // user installs the binary mid-session (e.g. `mise install`), and
+    // getClientForFile calls commandExists directly — caching false here would
+    // leave runtime guidance permanently dormant while client spawning can
+    // still succeed.
+    if (this.commandAvailability.get(command) === true) return true;
+    const available = commandExists(command);
+    if (available) this.commandAvailability.set(command, true);
+    return available;
+  }
 
   /**
    * Get or create an LSP client for the given file.

@@ -21,6 +21,15 @@ const TEXT_SEARCH_COMMAND_PATTERNS = [
   /\bag\b/,
 ];
 
+/**
+ * Returns a redirect message when the agent is about to run a text-search
+ * command (rg/grep/etc.) for a clearly semantic question (definitions,
+ * references, symbols, diagnostics…) over files that already have active LSP
+ * coverage. In that combination the lsp tool is strictly more accurate, so we
+ * block the bash call and steer the agent to lsp. Returns null otherwise — we
+ * don't interfere with plain-text searches or with searches that fall outside
+ * the active LSP coverage.
+ */
 export function shouldBlockSemanticBashSearch(
   command: string,
   prompt: string,

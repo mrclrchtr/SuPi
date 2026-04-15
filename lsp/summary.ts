@@ -1,12 +1,20 @@
 import * as path from "node:path";
 import type { ActiveCoverageSummaryEntry, OutstandingDiagnosticSummaryEntry } from "./manager.ts";
 
+/**
+ * Display form for a file path used both for human-readable LSP output and as
+ * the diagnostic key. In-tree paths return the project-relative form; out-of-
+ * tree paths preserve the absolute path so files in sibling worktrees or
+ * monorepo packages don't collapse to a basename — that collapse used to make
+ * unrelated files with the same name appear interchangeable in relevance
+ * matching, and it broke diagnostic correlation for tracked external paths.
+ */
 export function displayRelativeFilePath(filePath: string): string {
   const absolutePath = path.resolve(filePath);
   const relativePath = path.relative(process.cwd(), absolutePath);
   if (relativePath === "") return path.basename(absolutePath);
   if (relativePath.startsWith(`..${path.sep}`) || relativePath === "..") {
-    return path.basename(absolutePath);
+    return absolutePath;
   }
   return relativePath;
 }
@@ -47,6 +55,15 @@ export function normalizeRelevantPaths(relevantPaths: string[]): string[] {
   return Array.from(new Set(relevantPaths.map(normalizeRelevantPath).filter(Boolean)));
 }
 
+/**
+ * Match a file against caller-supplied relevance hints. Hints come from prompt
+ * tokens and recent tool paths, so they're heterogeneous: full relative paths,
+ * directory names, or bare filenames. Matching modes:
+ *  - exact path match
+ *  - candidate contains "/": treat as a directory prefix (`lsp/foo` ⊂ `lsp/foo/...`)
+ *  - candidate has no "/" and no ".": treat as a directory name anywhere in the path
+ *  - otherwise: treat as a filename and match the basename
+ */
 export function isPathRelevant(filePath: string, relevantPaths: string[]): boolean {
   const normalizedFilePath = normalizeRelevantPath(filePath);
   if (shouldIgnoreLspPath(normalizedFilePath)) return false;

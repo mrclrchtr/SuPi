@@ -19,8 +19,13 @@ describe("recent LSP paths", () => {
     expect(paths).toEqual(["README.md", "lsp/lsp.ts"]);
   });
 
-  it("ignores tracked paths outside the project root", () => {
+  it("preserves out-of-tree paths as absolute so sibling worktrees stay in the relevance set", () => {
     const paths = trackRecentPath(["README.md"], "/tmp/outside.ts", 2);
+    expect(paths).toEqual(["/tmp/outside.ts", "README.md"]);
+  });
+
+  it("still drops dependency paths even when they're outside the project root", () => {
+    const paths = trackRecentPath(["README.md"], "/tmp/other/node_modules/pkg/index.ts", 2);
     expect(paths).toEqual(["README.md"]);
   });
 

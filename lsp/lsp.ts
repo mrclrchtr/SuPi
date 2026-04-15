@@ -16,12 +16,12 @@ import { Type } from "@sinclair/typebox";
 import { shouldBlockSemanticBashSearch } from "./bash-guard.ts";
 import { loadConfig } from "./config.ts";
 import {
-  buildPreTurnLspContext,
   extractPromptPathHints,
   filterLspGuidanceMessages,
   lspPromptGuidelines,
   lspPromptSnippet,
   mergeRelevantPaths,
+  runtimeGuidanceFingerprint,
 } from "./guidance.ts";
 import { LspManager } from "./manager.ts";
 import { registerLspAwareToolOverrides } from "./overrides.ts";
@@ -30,6 +30,14 @@ import {
   restoreRecentPaths,
   updateRecentPathsFromToolEvent,
 } from "./recent-paths.ts";
+import {
+  computePendingRuntimeGuidance,
+  createRuntimeGuidanceState,
+  type LspRuntimeGuidanceState,
+  pruneMissingTrackedPaths,
+  registerQualifyingSourceInteraction,
+  resetRuntimeGuidanceState,
+} from "./runtime-state.ts";
 import { executeAction, type LspAction, lspToolDescription } from "./tool-actions.ts";
 import { type LspInspectorState, toggleLspStatusOverlay, updateLspUi } from "./ui.ts";
 
@@ -53,6 +61,7 @@ interface LspRuntimeState {
   guidanceCounter: number;
   inlineSeverity: number;
   inspector: LspInspectorState;
+  runtime: LspRuntimeGuidanceState;
 }
 
 export default function lspExtension(pi: ExtensionAPI) {
@@ -103,6 +112,7 @@ function createRuntimeState(inlineSeverity: number): LspRuntimeState {
       handle: null,
       close: null,
     },
+    runtime: createRuntimeGuidanceState(),
   };
 }
 
@@ -125,6 +135,7 @@ function registerSessionLifecycleHandlers(pi: ExtensionAPI, state: LspRuntimeSta
     state.currentPrompt = "";
     state.currentGuidanceToken = null;
     state.guidanceCounter = 0;
+    resetRuntimeGuidanceState(state.runtime);
     refreshRelevantPaths(state);
     updateLspUi(ctx, state.manager, state.inlineSeverity);
   });
@@ -141,6 +152,7 @@ function registerSessionLifecycleHandlers(pi: ExtensionAPI, state: LspRuntimeSta
     state.currentPrompt = "";
     state.currentRelevantPaths = [];
     state.currentGuidanceToken = null;
+    resetRuntimeGuidanceState(state.runtime);
   });
 
   pi.on("turn_end", async () => {
@@ -168,23 +180,46 @@ function registerBehaviorHandlers(pi: ExtensionAPI, state: LspRuntimeState): voi
     if (!state.manager) return;
 
     state.manager.pruneMissingFiles();
+    pruneMissingTrackedPaths(state.runtime);
     state.currentPrompt = event.prompt;
     refreshRelevantPaths(state);
-
-    const context = buildPreTurnLspContext(
-      state.manager,
-      state.inlineSeverity,
-      state.currentRelevantPaths,
-    );
-    state.currentGuidanceToken = context ? `lsp-guidance-${++state.guidanceCounter}` : null;
     updateLspUi(ctx, state.manager, state.inlineSeverity);
 
-    if (!context || !state.currentGuidanceToken) return;
+    const guidance = computePendingRuntimeGuidance(
+      state.runtime,
+      state.manager,
+      state.inlineSeverity,
+    );
+    if (!guidance) return;
+
+    const fingerprint = runtimeGuidanceFingerprint(guidance.input);
+
+    // Refresh the stored fingerprint even when there is nothing to inject.
+    // Without this, a diagnostic summary that disappears and later returns
+    // identical would still match the previously injected fingerprint and be
+    // silently skipped — the caller would never see the regression resurface.
+    if (!guidance.content) {
+      state.runtime.lastInjectedFingerprint = fingerprint;
+      return;
+    }
+
+    // Pending activation always injects (one-shot ready hint) regardless of
+    // fingerprint match; otherwise dedupe against the last injected snapshot.
+    if (
+      fingerprint === state.runtime.lastInjectedFingerprint &&
+      !guidance.input.pendingActivation
+    ) {
+      return;
+    }
+
+    state.runtime.lastInjectedFingerprint = fingerprint;
+    state.runtime.pendingActivation = false;
+    state.currentGuidanceToken = `lsp-guidance-${++state.guidanceCounter}`;
 
     return {
       message: {
         customType: "lsp-guidance",
-        content: context,
+        content: guidance.content,
         display: false,
         details: {
           guidanceToken: state.currentGuidanceToken,
@@ -224,6 +259,17 @@ function registerBehaviorHandlers(pi: ExtensionAPI, state: LspRuntimeState): voi
     }
 
     if (isLspAwareTool(event.toolName)) {
+      // Only treat successful interactions as qualifying. Failed lsp/read/edit
+      // calls (e.g. invalid params, missing files) shouldn't arm runtime
+      // guidance — the file may not have been touched at all.
+      if (!event.isError) {
+        registerQualifyingSourceInteraction(
+          state.runtime,
+          state.manager,
+          event.toolName,
+          event.input,
+        );
+      }
       updateLspUi(ctx, state.manager, state.inlineSeverity);
     }
   });

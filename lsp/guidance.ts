@@ -11,40 +11,69 @@ export const lspPromptGuidelines = [
   "Fall back to bash/read when LSP is unavailable, the file type is unsupported, or the task is plain-text search across docs, config files, or string literals.",
 ];
 
-type PreTurnContextManager = Pick<
-  LspManager,
-  | "getCoverageSummaryText"
-  | "getRelevantCoverageSummaryText"
-  | "getOutstandingDiagnosticsSummaryText"
-  | "getRelevantOutstandingDiagnosticsSummaryText"
->;
+type DiagnosticsManager = Pick<LspManager, "getRelevantOutstandingDiagnosticsSummaryText">;
 
 type GuidanceMessageLike = {
   customType?: string;
   details?: unknown;
 };
 
-export function buildPreTurnLspContext(
-  manager: PreTurnContextManager,
+export interface RuntimeGuidanceInput {
+  pendingActivation: boolean;
+  diagnosticsSummary: string | null;
+  trackedFiles: string[];
+}
+
+export function computeTrackedDiagnosticsSummary(
+  manager: DiagnosticsManager,
   inlineSeverity: number,
-  relevantPaths: string[] = [],
+  trackedPaths: string[],
 ): string | null {
-  const diagnostics =
-    manager.getRelevantOutstandingDiagnosticsSummaryText(relevantPaths, inlineSeverity) ??
-    manager.getOutstandingDiagnosticsSummaryText(inlineSeverity);
-  if (diagnostics) {
-    return ["LSP guidance:", `- ${diagnostics}`].join("\n");
+  if (trackedPaths.length === 0) return null;
+  return manager.getRelevantOutstandingDiagnosticsSummaryText(trackedPaths, inlineSeverity);
+}
+
+export function buildRuntimeLspGuidance(input: RuntimeGuidanceInput): string | null {
+  const lines: string[] = [];
+  const fileHint = summarizeTrackedFiles(input.trackedFiles);
+
+  if (input.pendingActivation) {
+    lines.push(
+      fileHint
+        ? `LSP ready for semantic navigation on tracked source files (${fileHint}).`
+        : "LSP ready for semantic navigation on the tracked source files.",
+    );
+  } else if (fileHint) {
+    // After activation, surface the current tracked-file context so the agent
+    // sees newly touched supported source files reflected in runtime guidance.
+    // Dedup is the caller's job (fingerprint match → skip).
+    lines.push(`LSP tracking source files: ${fileHint}.`);
   }
 
-  const coverage =
-    manager.getRelevantCoverageSummaryText(relevantPaths) ?? manager.getCoverageSummaryText();
-  if (!coverage) return null;
+  if (input.diagnosticsSummary) {
+    lines.push(input.diagnosticsSummary);
+  }
 
-  return [
-    "LSP guidance:",
-    `- ${coverage}`,
-    "- Prefer lsp for definitions, references, symbols, hover, rename planning, code actions, and diagnostics in those files.",
-  ].join("\n");
+  if (lines.length === 0) return null;
+
+  return ["LSP guidance:", ...lines.map((line) => `- ${line}`)].join("\n");
+}
+
+/**
+ * Fingerprint captures the parts of runtime guidance that persist across turns
+ * — tracked source-file set and tracked diagnostics summary. `pendingActivation`
+ * is a one-shot signal cleared after injection, so it's excluded; otherwise an
+ * unchanged-state turn would never match the previously stored fingerprint.
+ * Tracked files are included so newly opened supported files re-trigger
+ * guidance even when diagnostics are unchanged.
+ */
+export function runtimeGuidanceFingerprint(input: RuntimeGuidanceInput): string {
+  // Canonicalize by sorting: registerQualifyingSourceInteraction moves the most
+  // recent file to the front of trackedSourcePaths, so an order-sensitive join
+  // would treat re-touching an already-tracked file as a state change and
+  // re-inject guidance during ordinary back-and-forth edits.
+  const canonical = [...input.trackedFiles].sort().join("|");
+  return `${canonical}\u0000${input.diagnosticsSummary ?? ""}`;
 }
 
 export function extractPromptPathHints(prompt: string, cwd: string = process.cwd()): string[] {
@@ -89,6 +118,13 @@ export function filterLspGuidanceMessages<T extends GuidanceMessageLike>(
     if (!activeGuidanceToken) return false;
     return getGuidanceToken(message.details) === activeGuidanceToken;
   });
+}
+
+function summarizeTrackedFiles(files: string[], maxFiles: number = 2): string {
+  if (files.length === 0) return "";
+  const shown = files.slice(0, maxFiles).join(", ");
+  const remaining = files.length - maxFiles;
+  return remaining > 0 ? `${shown}, +${remaining} more` : shown;
 }
 
 function getGuidanceToken(details: unknown): string | null {
