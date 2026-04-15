@@ -18,7 +18,7 @@ Built for the [pi coding agent](https://github.com/mariozechner/pi-coding-agent)
 | **aliases** | Registers `/exit` to quit pi, `/e` as a shorthand alias, and `/clear` to start a new session (alias for `/new`) |
 | **bash-timeout** | Injects a default timeout on every bash tool call when the LLM omits one. Configurable via `PI_BASH_DEFAULT_TIMEOUT` (seconds, default 120). |
 | **skill-shortcut** | Type `$skill-name` as a shorthand for `/skill:skill-name`. Autocomplete triggers on `$`. |
-| **lsp** | Adds Language Server Protocol support for hover, definitions, references, symbols, rename, code actions, and diagnostics. It appends inline diagnostics after `write`/`edit`, advertises semantic-first tool guidance, and injects concise pre-turn LSP context based on relevant active coverage or outstanding diagnostics. |
+| **lsp** | Adds Language Server Protocol support for hover, definitions, references, symbols, rename, code actions, and diagnostics. It appends inline diagnostics after `write`/`edit`, advertises semantic-first tool guidance, and injects stateful pre-turn guidance that activates only after the session touches a supported source file. |
 
 ## Skills
 
@@ -47,8 +47,8 @@ The `lsp` extension is meant to make pi more semantic in supported languages:
 - exposes a single `lsp` tool with actions for hover, definition, references, diagnostics, symbols, rename, and code actions
 - appends LSP diagnostics after `write`/`edit`
 - adds semantic-first `promptSnippet` / `promptGuidelines` so the agent prefers `lsp` for code navigation and diagnostics
-- injects concise pre-turn context in `before_agent_start`, favoring relevant outstanding diagnostics first and otherwise summarizing relevant active LSP coverage
-- tracks prompt-mentioned and recently touched files to keep injected guidance focused
+- injects stateful pre-turn guidance in `before_agent_start` that stays dormant until the session successfully reads/edits/writes or runs `lsp` on a supported source file, then surfaces a one-shot activation hint, tracked-file context, and diagnostics for the tracked set — deduped across turns so unchanged state doesn't re-inject
+- tracks prompt-mentioned and recently touched files to scope semantic bash-search redirection and diagnostic relevance
 - provides `/lsp-status` for server and diagnostic visibility
 
 Configuration:
