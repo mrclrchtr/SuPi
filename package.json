@@ -27,6 +27,7 @@
     "lsp/*.json",
     "prompts/*.md",
     "skill-shortcut/*.ts",
+    "skills",
     "README.md",
     "LICENSE"
   ],
@@ -62,6 +63,9 @@
       "./bash-timeout/index.ts",
       "./skill-shortcut/skill-shortcut.ts",
       "./lsp/lsp.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "devDependencies": {

@@ -20,6 +20,14 @@ Built for the [pi coding agent](https://github.com/mariozechner/pi-coding-agent)
 | **skill-shortcut** | Type `$skill-name` as a shorthand for `/skill:skill-name`. Autocomplete triggers on `$`. |
 | **lsp** | Adds Language Server Protocol support for hover, definitions, references, symbols, rename, code actions, and diagnostics. It appends inline diagnostics after `write`/`edit`, advertises semantic-first tool guidance, and injects concise pre-turn LSP context based on relevant active coverage or outstanding diagnostics. |
 
+## Skills
+
+| Skill | Description |
+|-------|-------------|
+| **openspec-brainstorm** | Structured brainstorming for OpenSpec changes. It turns an idea into an approved change direction by exploring context, asking one question at a time, comparing approaches, and then recommending the best next OpenSpec skill before implementation starts. |
+
+Invoke it with `/skill:openspec-brainstorm`.
+
 ## Install
 
 ```bash
