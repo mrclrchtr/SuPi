@@ -12,7 +12,7 @@ importers:
         specifier: ~0.66.0
         version: 0.66.1(ws@8.20.0)(zod@4.3.6)
       '@mariozechner/pi-tui':
-        specifier: ~0.66.0
+        specifier: ~0.66.0 || ~0.67.0
         version: 0.66.1
       '@sinclair/typebox':
         specifier: '>=0.34.0'
