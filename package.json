@@ -52,7 +52,7 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "~0.66.0",
-    "@mariozechner/pi-tui": "~0.66.0",
+    "@mariozechner/pi-tui": "~0.66.0 || ~0.67.0",
     "@sinclair/typebox": ">=0.34.0"
   },
   "pi": {
